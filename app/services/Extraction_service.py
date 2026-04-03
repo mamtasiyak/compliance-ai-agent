@@ -121,6 +121,9 @@ Rules:
 - Set confidence to reflect how clearly the text implies the obligation.
 - Use null (not an empty string) for optional fields that are absent.
 - Do not invent obligations that are not supported by the document text.
+- Even if the document is short, extract any implied or explicit obligations.
+- Do not return an empty list unless absolutely no obligations exist.
+- Treat sentences with "must", "shall", "required", or "need to" as obligations.
 """ 
 
 def _build_user_prompt(document_text: str) -> str:
@@ -153,10 +156,10 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
     # 2. Parse JSON
     try:
         payload: dict[str, Any] = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
+    except json.JSONDecodeError as e:
         raise LLMResponseParseError(
-            f"LLM returned non-JSON content: {exc}\n\nRaw output:\n{raw[:500]}"
-        ) from exc
+            f"LLM returned non-JSON content: {e}\n\nRaw output:\n{raw[:500]}"
+        ) from e
  
     # 3. Validate individual obligations, skipping invalid ones with a warning
     raw_obligations: list[dict[str, Any]] = payload.get("obligations", [])
@@ -165,11 +168,11 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
     for idx, raw_ob in enumerate(raw_obligations):
         try:
             valid_obligations.append(ComplianceObligation.model_validate(raw_ob))
-        except ValidationError as exc:
+        except ValidationError as e:
             logger.warning(
                 "Obligation at index %d failed validation and was skipped: %s",
                 idx,
-                exc,
+                e,
             )
  
     # 4. Assemble ExtractionResult (model_validator enforces total_obligations consistency)
@@ -179,10 +182,10 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
             total_obligations=len(valid_obligations),
             obligations=valid_obligations,
         )
-    except ValidationError as exc:
+    except ValidationError as e:
         raise LLMResponseParseError(
-            f"Failed to construct ExtractionResult: {exc}"
-        ) from exc
+            f"Failed to construct ExtractionResult: {e}"
+        ) from e
  
  
 
@@ -236,12 +239,12 @@ class ExtractionService:
 
         try:
             raw_response = await self._provider.complete(system_prompt, user_prompt)
-        except Exception as exc:
+        except Exception as e:
             logger.exception("LLM provider raised an unexpected error.")
             raise RuntimeError(
                 "The LLM provider failed to return a response. "
                 "Check provider configuration and network connectivity."
-            ) from exc
+            ) from e
         
         result = _parse_llm_response(raw_response)
         logger.info("Extraction complete: %d obligation(s) found.", result.total_obligations)

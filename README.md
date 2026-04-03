@@ -53,7 +53,7 @@ OPENAI_API_KEY=your_api_key_here
 ```bash
 uv venv
 source .venv/bin/activate
-uv pip install -r requirements.txt
+uv sync
 uvicorn app.main:app --reload
 ```
 

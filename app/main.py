@@ -2,11 +2,15 @@
 FastAPI application entrypoint for the compliance obligation extraction service.
 """
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from fastapi import FastAPI
 
 from app.schemas.document import DocumentInput
 from app.schemas.extraction import ExtractionResult
 from app.services.Extraction_service import ExtractionService
+from app.services.openai_provider import OpenAIProvider
 
 app = FastAPI(
     title="Compliance Obligation Extractor",
@@ -28,6 +32,6 @@ async def extract_obligations(payload: DocumentInput) -> ExtractionResult:
 
     - **document_text**: Full text of the document to analyse.
     """
-
-    service = ExtractionService()
+    # service = ExtractionService()
+    service = ExtractionService(provider=OpenAIProvider())
     return await service.extract(payload.document_text)
