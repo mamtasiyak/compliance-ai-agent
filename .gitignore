@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+
+# Logs
+*.log
+
+# Documents (your note)
+*.docx
