@@ -2,8 +2,12 @@ import pytest
 
 import json
 
+from fastapi.testclient import TestClient
+from unittest.mock import AsyncMock, patch
+from app.main import app
+
 from app.schemas.compliance import RiskLevel
-from app.services.extraction_service import ExtractionService, BaseLLMProvider
+from app.services.extraction_service import ExtractionService, BaseLLMProvider, LLMResponseParseError
 
 
 class FakeLLMProvider(BaseLLMProvider):
@@ -108,3 +112,41 @@ async def test_invalid_obligation_is_skipped():
     assert len(result.obligations) == 1
     assert result.total_obligations == 1
 
+@pytest.mark.asyncio
+async def test_empty_llm_response_raises_runtime_error():
+    class EmptyResponseProvider(BaseLLMProvider):
+        async def complete(self, system_prompt: str, user_prompt: str) -> str:
+            return ""
+
+    service = ExtractionService(provider=EmptyResponseProvider())
+
+    with pytest.raises(RuntimeError):
+        await service.extract("Some document text.")
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_raises_parse_error():
+    class BadJsonProvider(BaseLLMProvider):
+        async def complete(self, system_prompt: str, user_prompt: str) -> str:
+            return "not json at all"
+        
+    service = ExtractionService(provider=BadJsonProvider())
+
+    with pytest.raises(LLMResponseParseError):
+        await service.extract("Some document text.")
+
+
+@pytest.mark.asyncio
+def test_api_returns_fallback_on_service_failure():
+    with patch(
+        "app.main.ExtractionService.extract",
+        new=AsyncMock(side_effect=RuntimeError("LLM failed")),
+    ):
+        client = TestClient(app)
+        response = client.post("/extract", json={"document_text": "The organisation must report any data breach within 72 hours. All incidents shall be documented and reviewed by the compliance team."})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_obligations"] == 0
+    assert data["obligations"] == []
+    assert "failed" in data["document_summary"].lower()

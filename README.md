@@ -1,6 +1,6 @@
 # Enterprise Agent Copilot
 
-AI-powered backend system for extracting structured compliance obligations from unstructured documents.
+AI powered backend system for extracting structured compliance obligations from unstructured documents.
 
 ## Overview
 

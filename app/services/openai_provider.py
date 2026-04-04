@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 
-from app.services.Extraction_service import BaseLLMProvider
+from app.services.extraction_service import BaseLLMProvider
 from openai import AsyncOpenAI, OpenAIError
 
 logger = logging.getLogger(__name__)

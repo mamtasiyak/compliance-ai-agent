@@ -155,6 +155,7 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
     """
 
     logger.info(f"Raw LLM response: {raw[:500]}")
+    logger.info("Parsing LLM response.")
 
     # 1. Strip markdown code fences if the model wrapped its output
     cleaned = raw.strip()
@@ -168,8 +169,9 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
     try:
         payload: dict[str, Any] = json.loads(cleaned)
     except json.JSONDecodeError as e:
+        logger.error("Failed to parse LLM response as JSON.")
         raise LLMResponseParseError(
-            f"LLM returned non-JSON content: {e}\n\nRaw output:\n{raw[:500]}"
+            f"Invalid JSON from LLM content: {e}\n\nRaw output:\n{raw[:500]}"
         ) from e
  
     # 3. Validate individual obligations, skipping invalid ones with a warning
@@ -255,8 +257,16 @@ class ExtractionService:
         system_prompt = _SYSTEM_PROMPT
         user_prompt = _build_user_prompt(document_text)
 
+        logger.info("Sending prompt to LLM provider.")
+        
         try:
             raw_response = await self._provider.complete(system_prompt, user_prompt)
+            if not raw_response or not raw_response.strip():
+                logger.error("LLM returned empty response.")
+                raise RuntimeError("LLM returned empty response.")
+            
+            logger.info("Received raw response from LLM (%d chars).", len(raw_response))
+
         except Exception as e:
             logger.exception("LLM provider raised an unexpected error.")
             raise RuntimeError(
