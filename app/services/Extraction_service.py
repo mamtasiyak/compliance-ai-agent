@@ -11,6 +11,7 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
+from unittest import result
 
 from pydantic import ValidationError
 
@@ -96,34 +97,41 @@ class PlaceholderLLMProvider(BaseLLMProvider):
         }
         return json.dumps(stub)
     
-_SYSTEM_PROMPT = """\
-You are a specialist compliance analyst. Your task is to read document 
-provided by the user and extract every distinct compliance obligation it contains.
-Return only a valid JSON object - no markdown, no commentary - with this exact shape:
-{
-    "document_summary": "<one to three sentence summary of the document>",
-    "obligations":[
-    {   
-        "obligation":           "<short title of the rule>",
-        "description":          "<detailed explanation of the obligation>",
-        "risk_level":           "<low | medium | high | critical>",
-        "deadline":             "<time requirement, or null>",
-        "responsible_entity":   "<accountable team or role, or null>",
-        "source_text":          "<verbatim excerpt from the document>",
-        "section_reference":    "<section or page reference, or null>",
-        "confidence":           <float 0.0-1.0>
-        }
-    ]
-}
+_SYSTEM_PROMPT = """
+You are a strict compliance extraction engine.
 
-Rules:
-- Extract every obligation; do not omit any.
-- Set confidence to reflect how clearly the text implies the obligation.
-- Use null (not an empty string) for optional fields that are absent.
-- Do not invent obligations that are not supported by the document text.
-- Even if the document is short, extract any implied or explicit obligations.
-- Do not return an empty list unless absolutely no obligations exist.
-- Treat sentences with "must", "shall", "required", or "need to" as obligations.
+Your task is to extract ALL compliance obligations from the given document.
+
+A compliance obligation is ANY sentence or rule that contains:
+- "must"
+- "shall"
+- "required"
+- "need to"
+- "should"
+
+IMPORTANT RULES:
+- ALWAYS extract obligations if any such language is present.
+- NEVER return an empty obligations list if at least one obligation exists.
+- Even for short documents, extract obligations.
+- Do NOT summarise instead of extracting.
+
+Return ONLY valid JSON in this exact format:
+
+{
+  "document_summary": "<short summary>",
+  "obligations": [
+    {
+      "obligation": "<short title>",
+      "description": "<detailed explanation>",
+      "risk_level": "<low | medium | high | critical>",
+      "deadline": "<or null>",
+      "responsible_entity": "<or null>",
+      "source_text": "<exact text>",
+      "section_reference": "<or null>",
+      "confidence": <0.0-1.0>
+    }
+  ]
+}
 """ 
 
 def _build_user_prompt(document_text: str) -> str:
@@ -145,6 +153,9 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
     Raises:
         LLMResponseParseError: On invalid JSON or schema validation failure.
     """
+
+    logger.info(f"Raw LLM response: {raw[:500]}")
+
     # 1. Strip markdown code fences if the model wrapped its output
     cleaned = raw.strip()
     if cleaned.startswith("```"):
@@ -166,6 +177,13 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
     valid_obligations: list[ComplianceObligation] = []
  
     for idx, raw_ob in enumerate(raw_obligations):
+        # --- normalization layer ---
+        if "risk_level" in raw_ob and isinstance(raw_ob["risk_level"], str):
+            raw_ob["risk_level"] = raw_ob["risk_level"].strip().capitalize()
+        # normalize strings (common cleanup)
+        for key in ["obligation", "description", "responsible_entity", "source_text"]:
+            if key in raw_ob and isinstance(raw_ob[key], str):
+                raw_ob[key] = raw_ob[key].strip()
         try:
             valid_obligations.append(ComplianceObligation.model_validate(raw_ob))
         except ValidationError as e:
@@ -248,4 +266,7 @@ class ExtractionService:
         
         result = _parse_llm_response(raw_response)
         logger.info("Extraction complete: %d obligation(s) found.", result.total_obligations)
+        if result.total_obligations == 0:
+            logger.warning("No obligations extracted from document.")
+
         return result
