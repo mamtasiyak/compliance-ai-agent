@@ -98,36 +98,49 @@ class PlaceholderLLMProvider(BaseLLMProvider):
         return json.dumps(stub)
     
 _SYSTEM_PROMPT = """
-You are a strict compliance extraction engine.
+You are a compliance extraction specialist. Your task is to extract distinct compliance obligations from the given document.
 
-Your task is to extract ALL compliance obligations from the given document.
+DEFINITION OF A COMPLIANCE OBLIGATION:
+A compliance obligation is a single, distinct requirement that an organisation or individual must fulfil. It may span multiple sentences if those sentences together describe ONE requirement (e.g. what must be done, who is responsible, and by when).
 
-A compliance obligation is ANY sentence or rule that contains:
-- "must"
-- "shall"
-- "required"
-- "need to"
-- "should"
+DO NOT create a separate obligation for:
+- Sentences that describe HOW to fulfil an existing obligation
+- Sentences that assign responsibility for the same obligation
+- Sentences that set the timeline for the same obligation
+These should be captured within the SAME obligation entry.
 
-IMPORTANT RULES:
-- ALWAYS extract obligations if any such language is present.
+WHEN TO CREATE A NEW OBLIGATION:
+Only create a new obligation when the document introduces a NEW and DISTINCT requirement — a different action, a different subject, or a different regulatory rule.
+
+EXAMPLES:
+BAD (over-splitting):
+- Obligation 1: "Employees must complete cybersecurity training within 14 days."
+- Obligation 2: "HR shall track completion status."
+→ These are ONE obligation. HR tracking is the enforcement mechanism, not a separate requirement.
+
+GOOD (correct grouping):
+- Obligation 1: "Cybersecurity Awareness Training — Employees must complete training within 14 days of joining. HR shall track completion and send reminders."
+
+ADDITIONAL RULES:
 - NEVER return an empty obligations list if at least one obligation exists.
-- Even for short documents, extract obligations.
 - Do NOT summarise instead of extracting.
+- obligation titles must be short (5-8 words max).
+- risk_level must be exactly one of: Low, Medium, High, Critical.
+- confidence reflects how clearly the obligation is stated (0.0–1.0).
 
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON in this exact format — no markdown, no explanation:
 
 {
-  "document_summary": "<short summary>",
+  "document_summary": "<short summary of the document>",
   "obligations": [
     {
       "obligation": "<short title>",
-      "description": "<detailed explanation>",
-      "risk_level": "<low | medium | high | critical>",
-      "deadline": "<or null>",
-      "responsible_entity": "<or null>",
-      "source_text": "<exact text>",
-      "section_reference": "<or null>",
+      "description": "<full explanation of what must be done, who is responsible, and by when>",
+      "risk_level": "<Low | Medium | High | Critical>",
+      "deadline": "<deadline or null>",
+      "responsible_entity": "<responsible party or null>",
+      "source_text": "<exact text from the document>",
+      "section_reference": "<section reference or null>",
       "confidence": <0.0-1.0>
     }
   ]
@@ -136,6 +149,8 @@ Return ONLY valid JSON in this exact format:
 
 def _build_user_prompt(document_text: str) -> str:
     return f"Document to analyse: \n\n{document_text}"
+
+
  
 class LLMResponseParseError(Exception):
     """Raised when the LLM response cannot be parsed into a valid ExtractionResult."""
@@ -207,7 +222,48 @@ def _parse_llm_response(raw:str) -> ExtractionResult:
             f"Failed to construct ExtractionResult: {e}"
         ) from e
  
- 
+def _merge_results(results: list[ExtractionResult]) -> ExtractionResult:
+    """
+    Merge multiple per-chunk ExtractionResults into a single result.
+
+    Uses the first chunk's summary as the document summary, concatenates
+    all obligations, and deduplicates by obligation title — keeping the
+    instance with the highest confidence score.
+    """
+    seen: dict[str, Any] = {}
+    for r in results:
+        for ob in r.obligations:
+            key = ob.obligation.strip().lower()
+            if key not in seen or ob.confidence > seen[key].confidence:
+                seen[key] = ob
+
+    unique_obligations = list(seen.values())
+
+    return ExtractionResult(
+        document_summary=results[0].document_summary,
+        total_obligations=len(unique_obligations),
+        obligations=unique_obligations,
+    )
+
+def _chunk_text(text: str, chunk_size: int = 3000, overlap: int = 200) -> list[str]:
+    """
+    Split text into overlapping chunks to avoid cutting obligations in half.
+
+    Args:
+        text: The full document text.
+        chunk_size: Maximum characters per chunk.
+        overlap: How many characters to repeat at the start of each new chunk.
+
+    Returns:
+        List of text chunks.
+    """
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
+    return chunks
 
 
 class ExtractionService:
@@ -236,35 +292,19 @@ class ExtractionService:
         """
         self._provider = provider or PlaceholderLLMProvider()
 
-    async def extract(self, document_text:str) -> ExtractionResult:
-        """
-        Analyse *document_text* and return all detected compliance obligations.
- 
-        Args:
-            document_text: The full plain-text content of the document to analyse.
- 
-        Returns:
-            A validated ExtractionResult containing the document summary,
-            obligation count, and list of ComplianceObligation objects.
- 
-        Raises:
-            LLMResponseParseError: If the LLM output cannot be parsed.
-            RuntimeError: If the LLM provider raises an unexpected error.
-        """
-
-        logger.info("Starting extraction for document of length (%d chars).", len(document_text))
-
+    async def _extract_chunk(self, chunk: str) -> ExtractionResult:
+        """Run extraction pipeline on a single chunk of text."""
         system_prompt = _SYSTEM_PROMPT
-        user_prompt = _build_user_prompt(document_text)
+        user_prompt = _build_user_prompt(chunk)
 
         logger.info("Sending prompt to LLM provider.")
-        
+
         try:
             raw_response = await self._provider.complete(system_prompt, user_prompt)
             if not raw_response or not raw_response.strip():
                 logger.error("LLM returned empty response.")
                 raise RuntimeError("LLM returned empty response.")
-            
+
             logger.info("Received raw response from LLM (%d chars).", len(raw_response))
 
         except Exception as e:
@@ -273,8 +313,37 @@ class ExtractionService:
                 "The LLM provider failed to return a response. "
                 "Check provider configuration and network connectivity."
             ) from e
-        
-        result = _parse_llm_response(raw_response)
+
+        return _parse_llm_response(raw_response)
+
+    async def extract(self, document_text: str) -> ExtractionResult:
+        """
+        Analyse *document_text* and return all detected compliance obligations.
+
+        Args:
+            document_text: The full plain-text content of the document to analyse.
+
+        Returns:
+            A validated ExtractionResult containing the document summary,
+            obligation count, and list of ComplianceObligation objects.
+
+        Raises:
+            LLMResponseParseError: If the LLM output cannot be parsed.
+            RuntimeError: If the LLM provider raises an unexpected error.
+        """
+        logger.info("Starting extraction for document of length (%d chars).", len(document_text))
+
+        if len(document_text) <= 3000:
+            result = await self._extract_chunk(document_text)
+        else:
+            chunks = _chunk_text(document_text)
+            logger.info("Document split into %d chunk(s).", len(chunks))
+            results = []
+            for i, chunk in enumerate(chunks):
+                logger.info("Extracting chunk %d/%d.", i + 1, len(chunks))
+                results.append(await self._extract_chunk(chunk))
+            result = _merge_results(results)
+
         logger.info("Extraction complete: %d obligation(s) found.", result.total_obligations)
         if result.total_obligations == 0:
             logger.warning("No obligations extracted from document.")
