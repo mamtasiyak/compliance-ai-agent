@@ -4,8 +4,22 @@ import json
 
 import requests
 import streamlit as st
+from pypdf import PdfReader
+
+def extract_text_from_pdf(file):
+    reader = PdfReader(file)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() or ""
+    return text
 
 st.title("Compliance Obligation Extractor")
+
+uploaded_file = st.file_uploader(
+    "Upload a PDF document",
+    type=["pdf"]
+)
+st.caption("💡 Tip: Upload contracts or policies (PDF) for best results.")
 
 # Initialise result storage on first load
 if "result" not in st.session_state:
@@ -18,11 +32,19 @@ RISK_COLORS = {
     "Low":      "🟢",
 }
 
-document_text = st.text_area(
-    label="Paste your document here",
-    height=300,
-    placeholder="e.g. All staff must complete annual GDPR training...",
-)
+if uploaded_file:
+    document_text = extract_text_from_pdf(uploaded_file)
+    st.text_area(
+        label="Extracted text (editable)",
+        value=document_text,
+        height=300
+    )
+else:
+    document_text = st.text_area(
+        label="Paste your document here",
+        height=300,
+        placeholder="e.g. All staff must complete annual GDPR training...",
+    )
 
 col1, col2 = st.columns([1, 1])
 
@@ -31,7 +53,8 @@ with col1:
         with st.spinner("Extracting obligations..."):
             try:
                 response = requests.post(
-                    "http://127.0.0.1:8000/extract",
+                    # "http://127.0.0.1:8000/extract",
+                    "https://compliance-extractor-api.onrender.com/extract",
                     json={"document_text": document_text},
                     timeout=30,
                 )
@@ -58,22 +81,23 @@ if st.session_state.result:
     st.write(data["document_summary"])
 
     st.subheader(f"Obligations Found: {data['total_obligations']}")
-
-    for i, ob in enumerate(data["obligations"], start=1):
-        risk = ob["risk_level"]
-        icon = RISK_COLORS.get(risk, "⚪")
-        with st.expander(f"{i}. {ob['obligation']}  —  {icon} {risk}"):
-            st.write(f"**Description:** {ob['description']}")
-            st.write(f"**Source text:** _{ob['source_text']}_")
-            if data["total_obligations"] == 0:
+    if data["total_obligations"] == 0:
                 st.warning("No obligations found in the document.")
-            if ob.get("deadline"):
-                st.write(f"**Deadline:** {ob['deadline']}")
-            if ob.get("responsible_entity"):
-                st.write(f"**Responsible:** {ob['responsible_entity']}")
-            if ob.get("section_reference"):
-                st.write(f"**Section:** {ob['section_reference']}")
-            st.write(f"**Confidence:** {round(ob['confidence'] * 100)}%")
+
+    else:
+        for i, ob in enumerate(data["obligations"], start=1):
+            risk = ob["risk_level"]
+            icon = RISK_COLORS.get(risk, "⚪")
+            with st.expander(f"{i}. {ob['obligation']}  —  {icon} {risk}"):
+                st.write(f"**Description:** {ob['description']}")
+                st.write(f"**Source text:** _{ob['source_text']}_")
+                if ob.get("deadline"):
+                    st.write(f"**Deadline:** {ob['deadline']}")
+                if ob.get("responsible_entity"):
+                    st.write(f"**Responsible:** {ob['responsible_entity']}")
+                if ob.get("section_reference"):
+                    st.write(f"**Section:** {ob['section_reference']}")
+                st.write(f"**Confidence:** {round(ob['confidence'] * 100)}%")
 
     # Export
     st.divider()
